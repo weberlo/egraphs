@@ -140,7 +140,19 @@ from union_find import UnionFind
 # After we analyze just with merges and queries, we can think about how `add`
 # calls fit in (i.e., the equality saturation use case).
 
-# TODO count both find and repair calls and modify the worklist processing scheme ().
+# TODO count both find and repair calls and modify the worklist processing
+# scheme (see if randomly reordering the worklist changes the number of repair
+# calls. if so, we have good evidence both that rebuilding obtains an
+# asymptotic improvement *and* that there is further work that can be done on
+# clever ordering of worklist processing).
+# After randomizing, trying different level orderings could be fruitful (i.e.,
+# process the e-classes from highest to lowest in the tree *or* do the reverse).
+
+# TODO add asserts for different invariants (e.g., congruence and hashcons) in
+# in the e-graph where the invariant must hold
+# TODO figure out where each invariant must hold
+
+DEBUG = True
 
 Sym = str
 EClassId = int
@@ -165,6 +177,15 @@ class ENode:
         self.egraph = egraph
 
     def __hash__(self):
+        # TODO we never modify the function symbol or the successors, so we can
+        # precompute the hash, especially since we (I think) always
+        # canonicalize nodes (creating a new one) before using them.
+        # This will be important when we start counting finds!
+        # Well... maybe not. Depends on whether we hash the canonicalized
+        # e-node more than once. If we do, then we should precompute, if we
+        # don't, then it doesn't matter, since we only compute it once either
+        # way.
+
         # generic XOR hash on recursive datatypes
         res = hash(self.sym)
         succ_hashes = [hash(self.egraph.find(a)) for a in self.succs]
@@ -184,9 +205,9 @@ class ENode:
 
 class EClass:
     nodes: Set[ENode]
-    preds: Set[Tuple[ENode, EClassId]]
+    preds: Dict[ENode, EClassId]
 
-    def __init__(self, nodes: Set[ENode], preds: Set[ENode]):
+    def __init__(self, nodes: Set[ENode], preds: Dict[ENode, EClassId]):
         self.nodes = nodes
         self.preds = preds
 
@@ -207,6 +228,7 @@ class EGraph:
         self.M = {}
         self.H = {}
         self.id_gen = 0
+        self.worklist = []
 
     ################
     # Construction #
@@ -227,26 +249,78 @@ class EGraph:
             n = self.canonicalize(n)
             a = self.new_singleton_eclass(n)
             for succ in n.succs:
-                self.M[succ].preds.add((n, a))
+                self.M[succ].preds[n] = a
             self.H[n] = a
             return a
 
     def merge(self, a: EClassId, b: EClassId) -> EClassId:
-        new_id = self.U.union(a, b)
+        if (canon := self.find(a)) == self.find(b):
+            return canon
+        # update (e-class ID -> e-class) map so `a` and `b` now point to the
+        # same merged e-class
         A = self.M[a]
         B = self.M[b]
+        # TODO how do we handle merging the two `preds` dictionaries?
+        # do we need to do canonicalization? we probably want to push that
+        # until rebuilding (even though we're currently doing strict
+        # rebuilding, we want to design this so it allows both eventually).
+        # Yeah. we don't need to do that here. we should even assert that all
+        # of the keys are distinct.
+        # No. They're not necessarily distinct, because they may be nodes that
+        # are both args of the same parent function.
+        # Really, we want to ensure they both point to the same e-class
+        if DEBUG:
+            for k in (A.preds.keys() & B.preds.keys()):
+                assert A.preds[k] == B.preds[k]
+
+        new_preds = A.preds.copy()
+        new_preds.update(B.preds)
         merged_class = EClass(
             A.nodes.union(B.nodes),
-            A.preds.union(B.preds))
+            new_preds)
+
+        new_id = self.U.union(a, b)
+        self.worklist.append(new_id)
         self.M[new_id] = merged_class
         self.M[a] = merged_class
         self.M[b] = merged_class
+
+        # strict rebuilding
+        self.rebuild()
+
+        return new_id
+
+    def rebuild(self):
+        while len(self.worklist) != 0:
+            deduped = {self.find(eclass) for eclass in self.worklist}
+            self.worklist.clear()
+            for eclass in deduped:
+                self.repair(eclass)
+
+    def repair(self, a):
+        A = self.M[a]
         # ensure canonical ENodes point to canonical EClasses in the hashcons
-        for (p_node, p_eclass) in merged_class.preds:
+        for (p_node, p_eclass) in A.preds.items():
             del self.H[p_node]
             p_node = self.canonicalize(p_node)
             self.H[p_node] = self.find(p_eclass)
-        return new_id
+
+        # since we've changed the equivalence relation, we also may now have
+        # parent e-nodes of this e-class who are congruent (previously, they
+        # would have had the same e-node symbol but their children
+        # would have had different canonical e-classes), meaning we need to
+        # merge them to compute the closure (in the rebuilding paradigm, we
+        # again just add them to the worklist).
+        new_parents = {}
+        for (p_enode, p_eclass) in A.preds.items():
+            p_enode = self.canonicalize(p_node)
+            if p_enode in new_parents:
+                # this node is congruent to another (previously distinct) node
+                # in `A`s parents, since its canonical representation is now
+                # equivalent to that node's
+                self.merge(p_eclass, new_parents[p_node])
+            new_parents[p_enode] = self.find(p_eclass)
+        A.preds = new_parents
 
     ###################
     # Utility methods #
@@ -254,7 +328,7 @@ class EGraph:
     def new_singleton_eclass(self, n: ENode):
         a = self.id_gen
         self.id_gen += 1
-        self.M[a] = EClass({n}, set())
+        self.M[a] = EClass({n}, {})
         return a
 
     def canonicalize(self, n: ENode):
@@ -267,10 +341,25 @@ class EGraph:
         # TODO I haven't seen this optimization mentioned anywhere.  Is this new?!  Is this sound?!
         # The idea is that you update the hashcons on the fly, in the same way
         # that you do path compression in union-find.
+        #
+        # Looks like egg does something similar:
+        #   https://github.com/egraphs-good/egg/blob/39415f19acdacd6dde62f40cb2bb08f8669acc85/src/egraph.rs#L266
+        # Weird. They have their own union-find impl where classes are unioned by whichever one has the lower ID???
+        #   https://github.com/egraphs-good/egg/blob/39415f19acdacd6dde62f40cb2bb08f8669acc85/src/unionfind.rs#L53
+        # I'd like to say this is just arbitrary, but the note in the link above says egg relies on this behavior!
+        #
+        # Nevermind about them doing something similar.  Essentially, all they're doing in their lookup impl is
+        #   a = self.H.get(self.canonicalize(n), None)
+        #   if a is not None:
+        #     a = self.find(a)
+        #   return a
+        # Comparing this to the original code presented in the paper, it's just layering an extra `find` at the end:
+        #   return self.H.get(self.canonicalize(n), None)
+        # It looked different, because they have one difference, which is they
+        # will mutably update the given enode `n` to be canonicalized upon
+        # return (kinda gross but maybe it has a use case), but they are not updating the hashcons.
 
-        # Original code
-        # return self.H.get(self.canonicalize(n), None)
-
+        # TODO disable this optimization when we get to testing.
         canon_n = self.canonicalize(n)
         a = self.H.get(canon_n, None)
         if a is None:
@@ -307,8 +396,6 @@ class EGraph:
         return self.lookup(ENode(t.sym, succ_ids, self))
 
 
-egraph = EGraph()
-
 def t(sym, *succs):
     return Term(sym, succs)
 
@@ -316,17 +403,40 @@ def l(sym):
     return Term(sym, [])
 
 
-a_plus_a = t('+', l('a'), l('a'))
-a_plus_b = t('+', l('a'), l('b'))
-two_times_a = t('*', l('2'), l('a'))
+def test_basic():
+    egraph = EGraph()
 
-a_plus_a_id = egraph.add_term(a_plus_a)
-a_plus_b_id = egraph.add_term(a_plus_b)
-two_times_a_id = egraph.add_term(two_times_a)
+    a_plus_a = t('+', l('a'), l('a'))
+    a_plus_b = t('+', l('a'), l('b'))
+    two_times_a = t('*', l('2'), l('a'))
+    # a_lshift_one = t('<<', l('a'), l('1'))
 
-egraph.merge(a_plus_a_id, two_times_a_id)
+    a_plus_a_id = egraph.add_term(a_plus_a)
+    a_plus_b_id = egraph.add_term(a_plus_b)
+    two_times_a_id = egraph.add_term(two_times_a)
 
-assert not egraph.equiv(a_plus_a, a_plus_b)
-assert egraph.equiv(a_plus_a, two_times_a)
+    egraph.merge(a_plus_a_id, two_times_a_id)
 
-import pdb; pdb.set_trace()
+    assert not egraph.equiv(a_plus_a, a_plus_b)
+    assert egraph.equiv(a_plus_a, two_times_a)
+
+    a_id = egraph.represents(l('a'))
+    b_id = egraph.represents(l('b'))
+    assert a_id != b_id
+    egraph.merge(a_id, b_id)
+    a_id = egraph.represents(l('a'))
+    b_id = egraph.represents(l('b'))
+    assert a_id == b_id
+    assert egraph.equiv(a_plus_a, a_plus_b)
+
+
+def test_nelson_oppen_fig1():
+    assert False, 'TODO'
+
+def main():
+    test_basic()
+    test_nelson_oppen_fig1()
+
+
+if __name__ == '__main__':
+    main()
