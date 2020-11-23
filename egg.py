@@ -153,6 +153,8 @@ from union_find import UnionFind
 # TODO figure out where each invariant must hold
 
 DEBUG = True
+# TODO disable this optimization when we get to testing.
+LOOKUP_COMPRESSION = True
 
 Sym = str
 EClassId = int
@@ -234,6 +236,7 @@ class EGraph:
     # Construction #
     ################
     def add_term(self, t: Term):
+        # add term bottom-up
         succs = [self.add_term(s) for s in t.succs]
         print(t.sym, succs)
         a = self.add(ENode(t.sym, succs, self))
@@ -359,17 +362,22 @@ class EGraph:
         # will mutably update the given enode `n` to be canonicalized upon
         # return (kinda gross but maybe it has a use case), but they are not updating the hashcons.
 
-        # TODO disable this optimization when we get to testing.
-        canon_n = self.canonicalize(n)
-        a = self.H.get(canon_n, None)
-        if a is None:
-            return None
-        elif (canon_a := self.find(a)) != a:
-            # `n`s canonical repr isn't mapped to a canonical e-class
-            # del self.H[canon_n]
-            self.H[canon_n] = canon_a
-            return canon_a
+        if LOOKUP_COMPRESSION:
+            canon_n = self.canonicalize(n)
+            a = self.H.get(canon_n, None)
+            if a is None:
+                return None
+            elif (canon_a := self.find(a)) != a:
+                # `n`s canonical repr isn't mapped to a canonical e-class
+                # del self.H[canon_n]
+                self.H[canon_n] = canon_a
+                return canon_a
+            else:
+                return a
         else:
+            a = self.H.get(self.canonicalize(n), None)
+            if a is not None:
+                a = self.find(a)
             return a
 
     def congruent(self, n1: ENode, n2: ENode) -> bool:
@@ -379,7 +387,7 @@ class EGraph:
 
     def equiv(self, x, y) -> bool:
         if type(x) == type(y) == EClassId:
-            return self.find(a) == self.find(b)
+            return self.find(x) == self.find(y)
         elif isinstance(x, ENode) and isinstance(y, ENode):
             return self.lookup(x) == self.lookup(y)
         elif isinstance(x, Term) and isinstance(y, Term):
@@ -399,17 +407,14 @@ class EGraph:
 def t(sym, *succs):
     return Term(sym, succs)
 
-def l(sym):
-    return Term(sym, [])
-
 
 def test_basic():
     egraph = EGraph()
 
-    a_plus_a = t('+', l('a'), l('a'))
-    a_plus_b = t('+', l('a'), l('b'))
-    two_times_a = t('*', l('2'), l('a'))
-    # a_lshift_one = t('<<', l('a'), l('1'))
+    a_plus_a = t('+', t('a'), t('a'))
+    a_plus_b = t('+', t('a'), t('b'))
+    two_times_a = t('*', t('2'), t('a'))
+    # a_lshift_one = t('<<', t('a'), t('1'))
 
     a_plus_a_id = egraph.add_term(a_plus_a)
     a_plus_b_id = egraph.add_term(a_plus_b)
@@ -420,22 +425,78 @@ def test_basic():
     assert not egraph.equiv(a_plus_a, a_plus_b)
     assert egraph.equiv(a_plus_a, two_times_a)
 
-    a_id = egraph.represents(l('a'))
-    b_id = egraph.represents(l('b'))
+    a_id = egraph.represents(t('a'))
+    b_id = egraph.represents(t('b'))
     assert a_id != b_id
     egraph.merge(a_id, b_id)
-    a_id = egraph.represents(l('a'))
-    b_id = egraph.represents(l('b'))
+    a_id = egraph.represents(t('a'))
+    b_id = egraph.represents(t('b'))
     assert a_id == b_id
     assert egraph.equiv(a_plus_a, a_plus_b)
 
 
 def test_nelson_oppen_fig1():
+    egraph = EGraph()
+    a = t('a')
+    b = t('b')
+    f = t('f', a, b)
+    f_f = t('f', f, b)
+
+    f_f_id = egraph.add_term(f_f)
+    f_id = egraph.add_term(f)
+    a_id = egraph.add_term(a)
+    b_id = egraph.add_term(b)
+
+    assert not egraph.equiv(f_f_id, a_id)  # f(f(a, b), b) != a
+    assert not egraph.equiv(f_f_id, f_id)  # f(f(a, b), b) != f(a, b)
+
+    egraph.merge(f_id, a_id)  # assert f(a, b) = a
+
+    assert egraph.equiv(f_id, a_id)        # f(a, b) = a
+    assert egraph.equiv(f_f_id, a_id)      # f(f(a, b), b) = a
+    assert egraph.equiv(f_f_id, f_id)      # f(f(a, b), b) = f(a, b)
+    assert not egraph.equiv(f_f_id, b_id)  # f(f(a, b), b) != b
+    assert not egraph.equiv(f_id, b_id)    # f(a, b) != b
+    assert not egraph.equiv(a_id, b_id)    # a != b
+
+
+def test_nelson_oppen_fig2():
+    egraph = EGraph()
+    curr = t('a')
+    terms = [curr]
+    for _ in range(5):
+        curr = t('f', curr)
+        terms.append(curr)
+
+    term_ids = []
+    for term in terms:
+        term_ids.append(egraph.add_term(term))
+
+    for i, term_id in enumerate(term_ids):
+        for term2_id in term_ids[:i]:
+            assert not egraph.equiv(term_id, term2_id)
+
+    # f(f(f(f(f(a))))) = a
+    egraph.merge(term_ids[0], term_ids[-1])
+    assert egraph.equiv(term_ids[0], term_ids[-1])
+    # ensure we've generated no new node equivalences other than the ones we
+    # merged.
+    for i, term_id in enumerate(term_ids):
+        for term2_id in term_ids[1:i]:
+            assert not egraph.equiv(term_id, term2_id)
+
+    # f(f(f(a))) = a
+    egraph.merge(term_ids[0], term_ids[3])
     assert False, 'TODO'
+    # TODO work through manually to see which equivs should hold before
+    # asserting anything
+
 
 def main():
-    test_basic()
-    test_nelson_oppen_fig1()
+    # test_basic()
+    # test_nelson_oppen_fig1()
+    test_nelson_oppen_fig2()
+    # TODO add worst case input for strict rebuilding that they mention in egg paper
 
 
 if __name__ == '__main__':
