@@ -50,6 +50,7 @@ class UnionFind:
 
     def find(self, p):
         """Find the set identifier for the item p."""
+        assert type(p) == int
 
         id = self._id
         while p != id[p]:
@@ -57,7 +58,7 @@ class UnionFind:
         return p
 
     def count(self):
-        """Return the number of items."""
+        """Return the number of distinct sets."""
 
         return self._count
 
@@ -75,16 +76,20 @@ class UnionFind:
         i = self.find(p)
         j = self.find(q)
         if i == j:
-            return
+            return i
 
         self._count -= 1
         if rank[i] < rank[j]:
             id[i] = j
+            res = j
         elif rank[i] > rank[j]:
             id[j] = i
+            res = i
         else:
             id[j] = i
             rank[i] += 1
+            res = i
+        return res
 
     def __str__(self):
         """String representation of the union find object."""
