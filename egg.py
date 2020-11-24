@@ -1,4 +1,6 @@
 import itertools
+import matplotlib
+import matplotlib.pyplot as plt
 import time
 from typing import *
 
@@ -605,24 +607,38 @@ def find_worst_input_for_linear():
 
 
 def plot_asymptotics_on_linear():
-    # TODO fix index of second merge to be 1 and vary `N`
     def run_with_strictness(strict):
         results = []
         for N in range(1, 101):
             egraph = EGraph(strict_rebuilding=strict)
             term_ids = setup_linear_graph(egraph, N)
+            start_time = time.time()
             egraph.merge(term_ids[0], term_ids[-1])
             egraph.merge(term_ids[1], term_ids[-1])
-            start_time = time.time()
             egraph.rebuild()
             rebuild_time = time.time() - start_time
             report = egraph.report()
-            results.append(dict(report, idx=i, rebuild_time=rebuild_time))
+            results.append(dict(report, N=N, rebuild_time=rebuild_time))
         return results
 
-    res = run_with_strictness(False)
-    import pdb; pdb.set_trace()
-    # run_with_strictness(True)
+    def plot_res(x_key, y_key, results, ax, label=None):
+        X = list(map(lambda d: d[x_key], results))
+        Y = list(map(lambda d: d[y_key], results))
+        ax.plot(X, Y, label=label)
+        ax.set(xlabel=x_key, ylabel=y_key)
+
+    lazy_res = run_with_strictness(False)
+    strict_res = run_with_strictness(True)
+
+    fig, ax = plt.subplots()
+    plot_res('N', 'num_finds', lazy_res, ax, label='lazy')
+    plot_res('N', 'num_finds', strict_res, ax, label='strict')
+
+    fig, ax = plt.subplots()
+    plot_res('N', 'rebuild_time', lazy_res, ax, label='lazy')
+    plot_res('N', 'rebuild_time', strict_res, ax, label='strict')
+
+    plt.show()
 
 # TODO after plotting asymptotics, there are three "extreme" inputs to consider:
 # - the one outlined in the egg paper
@@ -635,7 +651,8 @@ def main():
     # test_nelson_oppen_fig2_strict()
     # test_nelson_oppen_fig2_lazy()
     # test_linear_lazy()
-    find_worst_input_for_linear()
+    # find_worst_input_for_linear()
+    plot_asymptotics_on_linear()
 
 
 if __name__ == '__main__':
