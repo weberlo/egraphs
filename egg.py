@@ -152,6 +152,9 @@ from union_find import UnionFind
 # in the e-graph where the invariant must hold
 # TODO figure out where each invariant must hold
 
+# TODO as long as we always access self.M with self.M[self.find(a)], instead of
+# self.M[a], we can get rid of the non-canonical mapping when we merge.
+
 DEBUG = True
 # TODO disable this optimization when we get to testing.
 LOOKUP_COMPRESSION = True
@@ -487,9 +490,9 @@ def test_nelson_oppen_fig2():
 
     # f(f(f(a))) = a
     egraph.merge(term_ids[0], term_ids[3])
-    assert False, 'TODO'
-    # TODO work through manually to see which equivs should hold before
-    # asserting anything
+    # everything should now be equivalent
+    for (t1_id, t2_id) in itertools.combinations(term_ids, 2):
+        assert egraph.equiv(t1_id, t2_id)
 
 
 def main():
