@@ -75,7 +75,6 @@ class UnionFind:
 
     def union(self, p, q):
         """Combine sets containing p and q into a single set."""
-
         i = self.find(p)
         j = self.find(q)
         if i == j:

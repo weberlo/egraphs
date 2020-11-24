@@ -1,4 +1,5 @@
 import itertools
+import time
 from typing import *
 
 from union_find import UnionFind
@@ -240,8 +241,6 @@ class EGraph:
         self.lookup_compression = opts.get('lookup_compression', False)
         self.strict_rebuilding = opts.get('strict_rebuilding', True)
 
-        self.hot = False
-
     ################
     # Construction #
     ################
@@ -267,8 +266,6 @@ class EGraph:
             return a
 
     def merge(self, a: EClassId, b: EClassId) -> EClassId:
-        print(f'{self.U=}')
-        print(f'merge({a}, {b})')
         if (canon := self.find(a)) == self.find(b):
             return canon
         # update (e-class ID -> e-class) map so `a` and `b` now point to the
@@ -286,12 +283,6 @@ class EGraph:
         # Really, we want to ensure they both point to the same e-class
         if self.debug:
             for k in (A.preds.keys() & B.preds.keys()):
-                if k not in A.preds or k not in B.preds:
-                    # TODO oh shit. we're hitting here because ENode __eq__ is
-                    # overloaded to do a find on its children, I think?
-                    # yeah. confirmed.
-                    # TODO remove this block
-                    import pdb; pdb.set_trace()
                 assert A.preds[k] == B.preds[k]
 
         new_preds = A.preds.copy()
@@ -300,14 +291,7 @@ class EGraph:
             A.nodes.union(B.nodes),
             new_preds)
 
-        if a == 8 and b == 7:
-            self.hot = True
-
-        if self.hot:
-            print(f'A: {self.find(8)=}, {self.find(7)=}')
         new_id = self.U.union(a, b)
-        if self.hot:
-            print(f'B: {self.find(8)=}, {self.find(7)=}')
         self.worklist.append(new_id)
         self.M[new_id] = merged_class
         self.M[a] = merged_class
@@ -328,24 +312,14 @@ class EGraph:
     def repair(self, a):
         self.num_repairs += 1
         A = self.M[a]
-        if self.hot:
-            print(f'C: {self.find(8)=}, {self.find(7)=}')
         # ensure canonical ENodes point to canonical EClasses in the hashcons
         # by recanonicalizing nodes in `A`s dictionary of parents and finding
         # the new canonical e-class they should point to.
         for (p_enode, p_eclass) in A.preds.items():
             if p_enode in self.H:
                 del self.H[p_enode]
-            if self.hot:
-                print(f'CC: {self.find(8)=}, {self.find(7)=}')
             p_node = self.canonicalize(p_enode)
-            if self.hot and p_eclass == 4:
-                print(f'CCC {p_eclass=}: {self.find(8)=}, {self.find(7)=}')
             self.H[p_enode] = self.find(p_eclass)
-            if self.hot:
-                print(f'CCCC {p_eclass=}: {self.find(8)=}, {self.find(7)=}')
-        if self.hot:
-            print(f'D: {self.find(8)=}, {self.find(7)=}')
 
         # since we've changed the equivalence relation, we also may now have
         # parent e-nodes of this e-class who are congruent (previously, they
@@ -355,40 +329,14 @@ class EGraph:
         # again just add them to the worklist).
         new_parents = {}
         for (p_enode, p_eclass) in A.preds.items():
-            # NOTE We can get infinite recursion (merge -> rebuild -> repair ->
-            # merge -> ...) in the strict case, because we may not have updated
-            # `A`s preds to canonicalize the class IDs before we call `merge`
-            # again, so exactly the node that triggered the merge hasn't had
-            # its mapping canonicalized before the next merge, causing a loop
-            # of merges.
-            #
-            # To fix this, we modify the algorithm from the pseudocode outlined
-            # in Fig. 4 of egg, so we check if the canonical ID of `p_eclass`
-            # already matches the existing mapping in `new_parents`. If it
-            # does, then no need to merge.
-            #
-            # TODO nevermind. we're finding that we need to merge two classes
-            # `a` and `b` such that we already have `self.M[a] == self.M[b]` but `self.find(a)
-            # != self.find(b)`! How the hell are we getting in this state?
-            #
-            # It seems like union find successfully unions the two classes in
-            # `merge`, but then when we get to the PDB line below, the classes
-            # are no longer merged.  The fuck.
-            if self.hot:
-                print(f'E: {self.find(8)=}, {self.find(7)=}')
             p_enode = self.canonicalize(p_enode)
-            if self.hot:
-                print(f'F: {self.find(8)=}, {self.find(7)=}')
-            canon_p_eclass = self.find(p_eclass)
-            if self.hot:
-                print(f'E: {self.find(8)=}, {self.find(7)=}')
-            if p_enode in new_parents and new_parents[p_enode] != canon_p_eclass:
+            if p_enode in new_parents:
                 # this node is congruent to another (previously distinct) node
                 # in `A`s parents, since its canonical representation is now
                 # equivalent to that node's.
-                print(f'about to merge ({p_eclass=}, {canon_p_eclass=}) with {new_parents[p_enode]}')
-                # import pdb; pdb.set_trace()
                 canon_p_eclass = self.merge(p_eclass, new_parents[p_enode])
+            else:
+                canon_p_eclass = self.find(p_eclass)
             new_parents[p_enode] = canon_p_eclass
         A.preds = new_parents
 
@@ -478,9 +426,11 @@ class EGraph:
     def report(self):
         return {
             'num_repairs': self.num_repairs,
-            'num_finds': self.U.num_finds,
-            'hashcons_size': len(self.H),
-            'eclass_map_size': len(self.M)
+            'num_finds': self.U.num_finds
+            # NOTE no sense in printing these out, as they're always equal to
+            # the number of vertices
+            # 'hashcons_size': len(self.H),
+            # 'eclass_map_size': len(self.M)
         }
 
     def reset_op_counts(self):
@@ -613,57 +563,79 @@ def test_nelson_oppen_fig2_lazy():
 
 
 def find_worst_input_for_linear():
-    # assert False, 'TODO figure out why strict rebuilding falls into infinite recursion on linear graph'
-    N = 12
-    # for i in range(1, N+1):
-    i = 5
-    print('')
-    print(f'testing {i}')
-    egraph = EGraph(strict_rebuilding=True)
-    term_ids = setup_linear_graph(egraph, N)
-    # First, try optimizing with the first `merge` call held constant.
-    egraph.merge(term_ids[0], term_ids[-1])
-    egraph.merge(term_ids[i], term_ids[-1])
-    egraph.rebuild()
+    # Results for N=100:
+    #   Lazy:
+    #     max_repairs_item={'num_repairs': 99, 'num_finds': 1930, 'idx': 1}
+    #     max_finds_item={'num_repairs': 99, 'num_finds': 1930, 'idx': 1}
+    #
+    #   Strict:
+    #     max_repairs_item={'num_repairs': 100, 'num_finds': 13694, 'idx': 1}
+    #     max_finds_item={'num_repairs': 100, 'num_finds': 13694, 'idx': 1}
+    #
+    # Conclusion: merging `a` with the top of the `f` chain, then `f(a)` with
+    # the top of the `f` chain gives the worst number of finds.
+    #
+    # NOTE We can't try out the ordering heuristic on this linear graph, because the worklist
+    # is always length 1 (except at the beginning where we add two merge calls,
+    # but even then, both of them get deduped to the same e-class).
+    def run_with_strictness(strict):
+        N = 100
+        results = []
+        for i in range(1, N+1):
+            print(f'testing {i}')
+            egraph = EGraph(strict_rebuilding=strict)
+            term_ids = setup_linear_graph(egraph, N)
+            # First, try optimizing with the first `merge` call held constant.
+            egraph.merge(term_ids[0], term_ids[-1])
+            egraph.merge(term_ids[i], term_ids[-1])
+            start_time = time.time()
+            egraph.rebuild()
+            rebuild_time = time.time() - start_time
+            report = egraph.report()
+            results.append(dict(report, idx=i, rebuild_time=rebuild_time))
+        max_repairs_item = max(results, key=lambda d: d['num_repairs'])
+        max_finds_item = max(results, key=lambda d: d['num_finds'])
+        max_rebuild_time_item = max(results, key=lambda d: d['rebuild_time'])
+        print(f'{max_repairs_item=}')
+        print(f'{max_finds_item=}')
+        print(f'{max_rebuild_time_item=}')
 
-    # everything should now be equivalent
-    report = True
-    for (t1_id, t2_id) in itertools.combinations(term_ids, 2):
-        if not egraph.equiv(t1_id, t2_id):
-            report = False
-            break
-    if report:
-        print(f'{i=}: {egraph.report()}')
+    run_with_strictness(False)
+    run_with_strictness(True)
 
 
-def test_linear_lazy():
-    # for i in range(1, 101):
-    #     pass
-    egraph = EGraph(strict_rebuilding=False)
-    term_ids = setup_linear_graph(egraph, 100)
-    print(len(term_ids))
-    egraph.merge(term_ids[0], term_ids[-1])
-    egraph.merge(term_ids[7], term_ids[-1])
-    # egraph.merge(term_ids[10], term_ids[-1])
+def plot_asymptotics_on_linear():
+    # TODO fix index of second merge to be 1 and vary `N`
+    def run_with_strictness(strict):
+        results = []
+        for N in range(1, 101):
+            egraph = EGraph(strict_rebuilding=strict)
+            term_ids = setup_linear_graph(egraph, N)
+            egraph.merge(term_ids[0], term_ids[-1])
+            egraph.merge(term_ids[1], term_ids[-1])
+            start_time = time.time()
+            egraph.rebuild()
+            rebuild_time = time.time() - start_time
+            report = egraph.report()
+            results.append(dict(report, idx=i, rebuild_time=rebuild_time))
+        return results
 
-    egraph.rebuild()
-    print(egraph.report())
-    egraph.reset_op_counts()
+    res = run_with_strictness(False)
+    import pdb; pdb.set_trace()
+    # run_with_strictness(True)
 
-    # everything should now be equivalent
-    for (t1_id, t2_id) in itertools.combinations(term_ids, 2):
-        assert egraph.equiv(t1_id, t2_id)
-    print('done!')
-
+# TODO after plotting asymptotics, there are three "extreme" inputs to consider:
+# - the one outlined in the egg paper
+# - a generalization of nelson-oppen figure 1 (the f(f(a, b), b) = b example)
+# - some kind of complete tree
 
 def main():
     # test_basic()
     # test_nelson_oppen_fig1()
     # test_nelson_oppen_fig2_strict()
     # test_nelson_oppen_fig2_lazy()
-    find_worst_input_for_linear()
     # test_linear_lazy()
-    # TODO add worst case input for strict rebuilding that they mention in egg paper
+    find_worst_input_for_linear()
 
 
 if __name__ == '__main__':
