@@ -37,63 +37,66 @@ class UnionFind:
     It uses weighted quick union by rank with path compression.
     """
 
-    def __init__(self, N):
-        """Initialize an empty union find object with N items.
+    def __init__(self):
+        """Initialize an empty union find object."""
+        self.ids = []
+        self.count = 0
+        self.ranks = []
+        self.num_finds = 0
 
-        Args:
-            N: Number of items in the union find object.
-        """
-
-        self._id = list(range(N))
-        self._count = N
-        self._rank = [0] * N
+    def add_set(self):
+        new_id = len(self.ids)
+        self.ids.append(new_id)
+        self.count += 1
+        self.ranks.append(0)
+        return new_id
 
     def find(self, p):
         """Find the set identifier for the item p."""
         assert type(p) == int
 
-        id = self._id
-        while p != id[p]:
-            p = id[p] = id[id[p]]   # Path compression using halving.
-        return p
+        if p == self.ids[p]:
+            # only count in the base case, so we don't overcount with recursive
+            # calls
+            self.num_finds += 1
+            return p
+        else:
+            res = self.find(self.ids[p])
+            self.ids[p] = res
+            return res
 
     def count(self):
         """Return the number of distinct sets."""
-
-        return self._count
+        return self.count
 
     def connected(self, p, q):
         """Check if the items p and q are on the same set or not."""
-
         return self.find(p) == self.find(q)
 
     def union(self, p, q):
         """Combine sets containing p and q into a single set."""
-
-        id = self._id
-        rank = self._rank
 
         i = self.find(p)
         j = self.find(q)
         if i == j:
             return i
 
-        self._count -= 1
-        if rank[i] < rank[j]:
-            id[i] = j
+        self.count -= 1
+        if self.ranks[i] < self.ranks[j]:
+            self.ids[i] = j
             res = j
-        elif rank[i] > rank[j]:
-            id[j] = i
+        elif self.ranks[i] > self.ranks[j]:
+            self.ids[j] = i
             res = i
         else:
-            id[j] = i
-            rank[i] += 1
+            self.ids[j] = i
+            self.ranks[i] += 1
             res = i
         return res
 
     def __str__(self):
         """String representation of the union find object."""
-        return " ".join([str(x) for x in self._id])
+        return " ".join([str(x) for x in self.ids])
 
     def __repr__(self):
         """Representation of the union find object."""

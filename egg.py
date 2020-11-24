@@ -3,7 +3,6 @@ from typing import *
 
 from union_find import UnionFind
 
-
 # Questions:
 # - Can new nodes be added to union-find in the middle of the data structure's
 # lifetime? Is the inability to do so in the impl we have fundamental?
@@ -155,9 +154,9 @@ from union_find import UnionFind
 # TODO as long as we always access self.M with self.M[self.find(a)], instead of
 # self.M[a], we can get rid of the non-canonical mapping when we merge.
 
-DEBUG = True
-# TODO disable this optimization when we get to testing.
-LOOKUP_COMPRESSION = True
+# If you have a completely linear expr tree (e.g., f(f(f(...(a))))), is it the
+# case that lazy rebuilding saves you nothing? Or is this precisely the perfect
+# case when you might want to reorder how the worklist is being processed?
 
 Sym = str
 EClassId = int
@@ -174,12 +173,10 @@ class Term:
 class ENode:
     sym: Sym
     succs: List[EClassId]
-    egraph: 'EGraph'
 
-    def __init__(self, sym: Sym, succs: List[EClassId], egraph: 'EGraph'):
+    def __init__(self, sym: Sym, succs: List[EClassId]):
         self.sym = sym
         self.succs = succs
-        self.egraph = egraph
 
     def __hash__(self):
         # TODO we never modify the function symbol or the successors, so we can
@@ -193,7 +190,7 @@ class ENode:
 
         # generic XOR hash on recursive datatypes
         res = hash(self.sym)
-        succ_hashes = [hash(self.egraph.find(a)) for a in self.succs]
+        succ_hashes = [hash(a) for a in self.succs]
         for h in succ_hashes:
             res ^= h
         return res
@@ -201,11 +198,18 @@ class ENode:
     def __eq__(self, other):
         if not isinstance(other, ENode):
             return False
-        return self.egraph.congruent(self, other)
+        # NOTE this is *not* congruence, because we're not searching for the
+        # canonical e-class IDs. The main place this function is used is for
+        # the hashcons, where ENodes are keys, and it's the job of the e-graph
+        # to canonicalize the entries, not the ENode equality function.
+        #
+        # Using `egraph.congruent` also incurs a shit-ton of `find` calls.
+        return self.sym == other.sym and \
+            len(self.succs) == len(other.succs) and \
+            all(a == b for (a, b) in zip(self.succs, other.succs))
 
     def __repr__(self) -> str:
         return f'({self.sym}) -> {self.succs}'
-
 
 
 class EClass:
@@ -217,9 +221,6 @@ class EClass:
         self.preds = preds
 
 
-# TODO use a union-find that's dynamically resizable
-MAX_CLASSES = 1000
-
 class EGraph:
     # equivalence relation over e-class IDs
     U: UnionFind
@@ -228,12 +229,18 @@ class EGraph:
     # hashcons
     H: Dict[ENode, EClassId]
 
-    def __init__(self):
-        self.U = UnionFind(MAX_CLASSES)
+    def __init__(self, **opts):
+        self.U = UnionFind()
         self.M = {}
         self.H = {}
-        self.id_gen = 0
         self.worklist = []
+        self.num_repairs = 0
+
+        self.debug = opts.get('debug', True)
+        self.lookup_compression = opts.get('lookup_compression', False)
+        self.strict_rebuilding = opts.get('strict_rebuilding', True)
+
+        self.hot = False
 
     ################
     # Construction #
@@ -241,8 +248,8 @@ class EGraph:
     def add_term(self, t: Term):
         # add term bottom-up
         succs = [self.add_term(s) for s in t.succs]
-        print(t.sym, succs)
-        a = self.add(ENode(t.sym, succs, self))
+        # print(t.sym, succs)
+        a = self.add(ENode(t.sym, succs))
         return a
 
     ################################
@@ -260,6 +267,8 @@ class EGraph:
             return a
 
     def merge(self, a: EClassId, b: EClassId) -> EClassId:
+        print(f'{self.U=}')
+        print(f'merge({a}, {b})')
         if (canon := self.find(a)) == self.find(b):
             return canon
         # update (e-class ID -> e-class) map so `a` and `b` now point to the
@@ -275,8 +284,14 @@ class EGraph:
         # No. They're not necessarily distinct, because they may be nodes that
         # are both args of the same parent function.
         # Really, we want to ensure they both point to the same e-class
-        if DEBUG:
+        if self.debug:
             for k in (A.preds.keys() & B.preds.keys()):
+                if k not in A.preds or k not in B.preds:
+                    # TODO oh shit. we're hitting here because ENode __eq__ is
+                    # overloaded to do a find on its children, I think?
+                    # yeah. confirmed.
+                    # TODO remove this block
+                    import pdb; pdb.set_trace()
                 assert A.preds[k] == B.preds[k]
 
         new_preds = A.preds.copy()
@@ -285,14 +300,21 @@ class EGraph:
             A.nodes.union(B.nodes),
             new_preds)
 
+        if a == 8 and b == 7:
+            self.hot = True
+
+        if self.hot:
+            print(f'A: {self.find(8)=}, {self.find(7)=}')
         new_id = self.U.union(a, b)
+        if self.hot:
+            print(f'B: {self.find(8)=}, {self.find(7)=}')
         self.worklist.append(new_id)
         self.M[new_id] = merged_class
         self.M[a] = merged_class
         self.M[b] = merged_class
 
-        # strict rebuilding
-        self.rebuild()
+        if self.strict_rebuilding:
+            self.rebuild()
 
         return new_id
 
@@ -304,12 +326,26 @@ class EGraph:
                 self.repair(eclass)
 
     def repair(self, a):
+        self.num_repairs += 1
         A = self.M[a]
+        if self.hot:
+            print(f'C: {self.find(8)=}, {self.find(7)=}')
         # ensure canonical ENodes point to canonical EClasses in the hashcons
-        for (p_node, p_eclass) in A.preds.items():
-            del self.H[p_node]
-            p_node = self.canonicalize(p_node)
-            self.H[p_node] = self.find(p_eclass)
+        # by recanonicalizing nodes in `A`s dictionary of parents and finding
+        # the new canonical e-class they should point to.
+        for (p_enode, p_eclass) in A.preds.items():
+            if p_enode in self.H:
+                del self.H[p_enode]
+            if self.hot:
+                print(f'CC: {self.find(8)=}, {self.find(7)=}')
+            p_node = self.canonicalize(p_enode)
+            if self.hot and p_eclass == 4:
+                print(f'CCC {p_eclass=}: {self.find(8)=}, {self.find(7)=}')
+            self.H[p_enode] = self.find(p_eclass)
+            if self.hot:
+                print(f'CCCC {p_eclass=}: {self.find(8)=}, {self.find(7)=}')
+        if self.hot:
+            print(f'D: {self.find(8)=}, {self.find(7)=}')
 
         # since we've changed the equivalence relation, we also may now have
         # parent e-nodes of this e-class who are congruent (previously, they
@@ -319,26 +355,53 @@ class EGraph:
         # again just add them to the worklist).
         new_parents = {}
         for (p_enode, p_eclass) in A.preds.items():
-            p_enode = self.canonicalize(p_node)
-            if p_enode in new_parents:
+            # NOTE We can get infinite recursion (merge -> rebuild -> repair ->
+            # merge -> ...) in the strict case, because we may not have updated
+            # `A`s preds to canonicalize the class IDs before we call `merge`
+            # again, so exactly the node that triggered the merge hasn't had
+            # its mapping canonicalized before the next merge, causing a loop
+            # of merges.
+            #
+            # To fix this, we modify the algorithm from the pseudocode outlined
+            # in Fig. 4 of egg, so we check if the canonical ID of `p_eclass`
+            # already matches the existing mapping in `new_parents`. If it
+            # does, then no need to merge.
+            #
+            # TODO nevermind. we're finding that we need to merge two classes
+            # `a` and `b` such that we already have `self.M[a] == self.M[b]` but `self.find(a)
+            # != self.find(b)`! How the hell are we getting in this state?
+            #
+            # It seems like union find successfully unions the two classes in
+            # `merge`, but then when we get to the PDB line below, the classes
+            # are no longer merged.  The fuck.
+            if self.hot:
+                print(f'E: {self.find(8)=}, {self.find(7)=}')
+            p_enode = self.canonicalize(p_enode)
+            if self.hot:
+                print(f'F: {self.find(8)=}, {self.find(7)=}')
+            canon_p_eclass = self.find(p_eclass)
+            if self.hot:
+                print(f'E: {self.find(8)=}, {self.find(7)=}')
+            if p_enode in new_parents and new_parents[p_enode] != canon_p_eclass:
                 # this node is congruent to another (previously distinct) node
                 # in `A`s parents, since its canonical representation is now
-                # equivalent to that node's
-                self.merge(p_eclass, new_parents[p_node])
-            new_parents[p_enode] = self.find(p_eclass)
+                # equivalent to that node's.
+                print(f'about to merge ({p_eclass=}, {canon_p_eclass=}) with {new_parents[p_enode]}')
+                # import pdb; pdb.set_trace()
+                canon_p_eclass = self.merge(p_eclass, new_parents[p_enode])
+            new_parents[p_enode] = canon_p_eclass
         A.preds = new_parents
 
     ###################
     # Utility methods #
     ###################
     def new_singleton_eclass(self, n: ENode):
-        a = self.id_gen
-        self.id_gen += 1
+        a = self.U.add_set()
         self.M[a] = EClass({n}, {})
         return a
 
     def canonicalize(self, n: ENode):
-        return ENode(n.sym, [self.U.find(a) for a in n.succs], self)
+        return ENode(n.sym, [self.U.find(a) for a in n.succs])
 
     def find(self, a: EClassId) -> EClassId:
         return self.U.find(a)
@@ -347,6 +410,9 @@ class EGraph:
         # TODO I haven't seen this optimization mentioned anywhere.  Is this new?!  Is this sound?!
         # The idea is that you update the hashcons on the fly, in the same way
         # that you do path compression in union-find.
+        #
+        # Note that for testing, `lookup` is only used for `equiv` checks and
+        # for `add`, so it shouldn't affect `merge` results.
         #
         # Looks like egg does something similar:
         #   https://github.com/egraphs-good/egg/blob/39415f19acdacd6dde62f40cb2bb08f8669acc85/src/egraph.rs#L266
@@ -365,7 +431,7 @@ class EGraph:
         # will mutably update the given enode `n` to be canonicalized upon
         # return (kinda gross but maybe it has a use case), but they are not updating the hashcons.
 
-        if LOOKUP_COMPRESSION:
+        if self.lookup_compression:
             canon_n = self.canonicalize(n)
             a = self.H.get(canon_n, None)
             if a is None:
@@ -404,7 +470,22 @@ class EGraph:
         succ_ids = [self.represents(s) for s in t.succs]
         if any(map(lambda a: a == None, succ_ids)):
             return None
-        return self.lookup(ENode(t.sym, succ_ids, self))
+        return self.lookup(ENode(t.sym, succ_ids))
+
+    ################
+    # Benchmarking #
+    ################
+    def report(self):
+        return {
+            'num_repairs': self.num_repairs,
+            'num_finds': self.U.num_finds,
+            'hashcons_size': len(self.H),
+            'eclass_map_size': len(self.M)
+        }
+
+    def reset_op_counts(self):
+        self.num_repairs = 0
+        self.U.num_finds = 0
 
 
 def t(sym, *succs):
@@ -436,6 +517,7 @@ def test_basic():
     b_id = egraph.represents(t('b'))
     assert a_id == b_id
     assert egraph.equiv(a_plus_a, a_plus_b)
+    print('done!')
 
 
 def test_nelson_oppen_fig1():
@@ -461,13 +543,17 @@ def test_nelson_oppen_fig1():
     assert not egraph.equiv(f_f_id, b_id)  # f(f(a, b), b) != b
     assert not egraph.equiv(f_id, b_id)    # f(a, b) != b
     assert not egraph.equiv(a_id, b_id)    # a != b
+    print('done!')
 
 
-def test_nelson_oppen_fig2():
-    egraph = EGraph()
+def setup_linear_graph(egraph, n):
+    """
+    Create graph of f(f(...(a))), where `f` is applied `n` times, giving
+    `n+1` vertices overall.
+    """
     curr = t('a')
     terms = [curr]
-    for _ in range(5):
+    for _ in range(n):
         curr = t('f', curr)
         terms.append(curr)
 
@@ -478,9 +564,18 @@ def test_nelson_oppen_fig2():
     for i, term_id in enumerate(term_ids):
         for term2_id in term_ids[:i]:
             assert not egraph.equiv(term_id, term2_id)
+    egraph.reset_op_counts()
+    return term_ids
+
+
+def test_nelson_oppen_fig2_strict():
+    egraph = EGraph(strict_rebuilding=True)
+    term_ids = setup_linear_graph(egraph, 5)
 
     # f(f(f(f(f(a))))) = a
     egraph.merge(term_ids[0], term_ids[-1])
+    print(egraph.report())
+    egraph.reset_op_counts()
     assert egraph.equiv(term_ids[0], term_ids[-1])
     # ensure we've generated no new node equivalences other than the ones we
     # merged.
@@ -490,15 +585,84 @@ def test_nelson_oppen_fig2():
 
     # f(f(f(a))) = a
     egraph.merge(term_ids[0], term_ids[3])
+    print(egraph.report())
+    egraph.reset_op_counts()
     # everything should now be equivalent
     for (t1_id, t2_id) in itertools.combinations(term_ids, 2):
         assert egraph.equiv(t1_id, t2_id)
+    print('done!')
+
+
+def test_nelson_oppen_fig2_lazy():
+    egraph = EGraph(strict_rebuilding=False)
+    term_ids = setup_linear_graph(egraph, 5)
+
+    # f(f(f(f(f(a))))) = a
+    egraph.merge(term_ids[0], term_ids[-1])
+    # f(f(f(a))) = a
+    egraph.merge(term_ids[0], term_ids[3])
+    # ensure we haven't prematurely processed anything
+    assert len(egraph.worklist) == 2
+    egraph.rebuild()
+    print(egraph.report())
+    egraph.reset_op_counts()
+    # everything should now be equivalent
+    for (t1_id, t2_id) in itertools.combinations(term_ids, 2):
+        assert egraph.equiv(t1_id, t2_id)
+    print('done!')
+
+
+def find_worst_input_for_linear():
+    # assert False, 'TODO figure out why strict rebuilding falls into infinite recursion on linear graph'
+    N = 12
+    # for i in range(1, N+1):
+    i = 5
+    print('')
+    print(f'testing {i}')
+    egraph = EGraph(strict_rebuilding=True)
+    term_ids = setup_linear_graph(egraph, N)
+    # First, try optimizing with the first `merge` call held constant.
+    egraph.merge(term_ids[0], term_ids[-1])
+    egraph.merge(term_ids[i], term_ids[-1])
+    egraph.rebuild()
+
+    # everything should now be equivalent
+    report = True
+    for (t1_id, t2_id) in itertools.combinations(term_ids, 2):
+        if not egraph.equiv(t1_id, t2_id):
+            report = False
+            break
+    if report:
+        print(f'{i=}: {egraph.report()}')
+
+
+def test_linear_lazy():
+    # for i in range(1, 101):
+    #     pass
+    egraph = EGraph(strict_rebuilding=False)
+    term_ids = setup_linear_graph(egraph, 100)
+    print(len(term_ids))
+    egraph.merge(term_ids[0], term_ids[-1])
+    egraph.merge(term_ids[7], term_ids[-1])
+    # egraph.merge(term_ids[10], term_ids[-1])
+
+    egraph.rebuild()
+    print(egraph.report())
+    egraph.reset_op_counts()
+
+    # everything should now be equivalent
+    for (t1_id, t2_id) in itertools.combinations(term_ids, 2):
+        assert egraph.equiv(t1_id, t2_id)
+    print('done!')
 
 
 def main():
     # test_basic()
     # test_nelson_oppen_fig1()
-    test_nelson_oppen_fig2()
+    # test_nelson_oppen_fig2_strict()
+    # test_nelson_oppen_fig2_lazy()
+    find_worst_input_for_linear()
+    # test_linear_lazy()
     # TODO add worst case input for strict rebuilding that they mention in egg paper
 
 
