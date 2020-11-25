@@ -3,6 +3,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import time
 from typing import *
+from math import log2
 
 from union_find import UnionFind
 
@@ -609,7 +610,10 @@ def find_worst_input_for_linear():
 def plot_asymptotics_on_linear():
     def run_with_strictness(strict):
         results = []
-        for N in range(1, 101):
+        for N in range(300):
+            N = N + 1
+            if N % 100 == 0:
+              print("N =", N)
             egraph = EGraph(strict_rebuilding=strict)
             term_ids = setup_linear_graph(egraph, N)
             start_time = time.time()
@@ -621,9 +625,9 @@ def plot_asymptotics_on_linear():
             results.append(dict(report, N=N, rebuild_time=rebuild_time))
         return results
 
-    def plot_res(x_key, y_key, results, ax, label=None):
+    def plot_res(x_key, y_key, results, ax, curve_fit, label=None):
         X = list(map(lambda d: d[x_key], results))
-        Y = list(map(lambda d: d[y_key], results))
+        Y = list(map(lambda d: d[y_key] / curve_fit(d[x_key]), results))
         ax.plot(X, Y, label=label)
         ax.set(xlabel=x_key, ylabel=y_key)
 
@@ -631,12 +635,12 @@ def plot_asymptotics_on_linear():
     strict_res = run_with_strictness(True)
 
     fig, ax = plt.subplots()
-    plot_res('N', 'num_finds', lazy_res, ax, label='lazy')
-    plot_res('N', 'num_finds', strict_res, ax, label='strict')
+    plot_res('N', 'num_finds', lazy_res, ax, lambda N: N*log2(N+1), label='lazy')
+    plot_res('N', 'num_finds', strict_res, ax, lambda N: N**2, label='strict')
 
-    fig, ax = plt.subplots()
-    plot_res('N', 'rebuild_time', lazy_res, ax, label='lazy')
-    plot_res('N', 'rebuild_time', strict_res, ax, label='strict')
+    # fig, ax = plt.subplots()
+    # plot_res('N', 'rebuild_time', lazy_res, ax, label='lazy')
+    # plot_res('N', 'rebuild_time', strict_res, ax, label='strict')
 
     plt.show()
 
