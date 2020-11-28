@@ -37,21 +37,37 @@ class UnionFind:
     It uses weighted quick union by rank with path compression.
     """
 
-    def __init__(self):
+    def __init__(self, deterministic=False):
         """Initialize an empty union find object."""
         self.ids = []
         self.count = 0
         self.ranks = []
         self.num_finds = 0
+        self.extToInt = []
+        self.intToExt = []
+        self.deterministic = deterministic
 
     def add_set(self):
         new_id = len(self.ids)
         self.ids.append(new_id)
         self.count += 1
         self.ranks.append(0)
+        self.extToInt.append(new_id)
+        self.intToExt.append(new_id)
         return new_id
 
+    # def find(self, p):
+    #     """Find the set identifier for the item p."""
+    #     assert type(p) == int
+    #     p = self.extToInt[p]
+    #     return self.intToExt[self.find_internal(p)]
+
     def find(self, p):
+        """Find the set identifier for the item p."""
+        assert type(p) == int
+        return self.intToExt[self.find_internal(self.extToInt[p])]
+
+    def find_internal(self, p):
         """Find the set identifier for the item p."""
         assert type(p) == int
 
@@ -61,9 +77,23 @@ class UnionFind:
             self.num_finds += 1
             return p
         else:
-            res = self.find(self.ids[p])
+            res = self.find_internal(self.ids[p])
             self.ids[p] = res
             return res
+
+    # def find_internal(self, p):
+    #     """Internal version of find."""
+    #     assert type(p) == int
+
+    #     if p == self.ids[p]:
+    #         # only count in the base case, so we don't overcount with recursive
+    #         # calls
+    #         self.num_finds += 1
+    #         return p
+    #     else:
+    #         res = self.find_internal(self.ids[p])
+    #         self.ids[p] = res
+    #         return p
 
     def count(self):
         """Return the number of distinct sets."""
@@ -74,16 +104,25 @@ class UnionFind:
         return self.find(p) == self.find(q)
 
     def union(self, p, q):
-        """Combine sets containing p and q into a single set."""
+        """Combine sets containing p and q into a single set. New set's representative is p."""
         i = self.find(p)
         j = self.find(q)
+
+        i = self.extToInt[i]
+        j = self.extToInt[j]
+
         if i == j:
-            return i
+            return self.intToExt[i]
 
         self.count -= 1
         if self.ranks[i] < self.ranks[j]:
             self.ids[i] = j
             res = j
+            # update the int <-> ext mappings
+            if self.deterministic:
+                self.intToExt[i], self.intToExt[j] = self.intToExt[j], self.intToExt[i]
+                self.extToInt[self.intToExt[i]
+                              ], self.extToInt[self.intToExt[j]] = i, j
         elif self.ranks[i] > self.ranks[j]:
             self.ids[j] = i
             res = i
@@ -91,7 +130,9 @@ class UnionFind:
             self.ids[j] = i
             self.ranks[i] += 1
             res = i
-        return res
+        # print(self.intToExt)
+        # print(self.extToInt)
+        return self.intToExt[res]
 
     def __str__(self):
         """String representation of the union find object."""
@@ -100,6 +141,7 @@ class UnionFind:
     def __repr__(self):
         """Representation of the union find object."""
         return "UnionFind(" + str(self) + ")"
+
 
 if __name__ == "__main__":
     print("Union find data structure.")

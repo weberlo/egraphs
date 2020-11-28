@@ -234,7 +234,7 @@ class EGraph:
     H: Dict[ENode, EClassId]
 
     def __init__(self, **opts):
-        self.U = UnionFind()
+        self.U = UnionFind(deterministic=True)
         self.M = {}
         self.H = {}
         self.worklist = []
@@ -294,7 +294,18 @@ class EGraph:
             A.nodes.union(B.nodes),
             new_preds)
 
+        # naive merging
         new_id = self.U.union(a, b)
+        
+        # # modify by smaller half. cf. DST
+        # if len(A.preds) <= len(B.preds):
+        #   # old_a = self.U.find(a)
+        #   new_id = self.U.union(b, a)
+        #   # assert(old_a == self.U.find(new_id))
+        # else:
+        #   # old_b = self.U.find(b)
+        #   new_id = self.U.union(a, b)
+        #   # assert(old_b == self.U.find(new_id))
         self.worklist.append(new_id)
         self.M[new_id] = merged_class
         self.M[a] = merged_class
@@ -610,8 +621,8 @@ def find_worst_input_for_linear():
 def plot_asymptotics_on_linear():
     def run_with_strictness(strict):
         results = []
-        for N in range(300):
-            N = N + 1
+        for N in range(200):
+            N = N + 50
             if N % 100 == 0:
               print("N =", N)
             egraph = EGraph(strict_rebuilding=strict)
@@ -632,15 +643,22 @@ def plot_asymptotics_on_linear():
         ax.set(xlabel=x_key, ylabel=y_key)
 
     lazy_res = run_with_strictness(False)
-    strict_res = run_with_strictness(True)
+    # strict_res = run_with_strictness(True)
 
     fig, ax = plt.subplots()
-    plot_res('N', 'num_finds', lazy_res, ax, lambda N: N*log2(N+1), label='lazy')
-    plot_res('N', 'num_finds', strict_res, ax, lambda N: N**2, label='strict')
+    # N*log2(N+1) 
+    # N*log2(log2(N+1)+1)
+    # N*log2(log2(log2(log2(N+1)+1)+1)+1)
+    plot_res('N', 'num_finds', lazy_res, ax, lambda N: N*log2(log2(log2(log2(log2(log2(log2(N+1)+1)+1)+1)+1)+1)+1), label='lazy')
+    # plot_res('N', 'num_finds', lazy_res, ax, lambda N: N, label='lazy')
+    # N**2
+    # plot_res('N', 'num_finds', strict_res, ax, lambda N: N**2, label='strict')
 
     # fig, ax = plt.subplots()
     # plot_res('N', 'rebuild_time', lazy_res, ax, label='lazy')
     # plot_res('N', 'rebuild_time', strict_res, ax, label='strict')
+
+    plt.axhline(y=0, color='r', linestyle='-')
 
     plt.show()
 
